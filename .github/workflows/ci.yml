@@ -51,11 +51,12 @@ jobs:
       - name: Sync dependencies (generate go.sum)
         run: go mod tidy
 
+      # v2 do golangci-lint (via action v8) é compilado com Go 1.25; a v6/v1
+      # recusa analisar um módulo que declara 'go 1.25.0'.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
-          args: --timeout=5m
+          version: v2.13.2
 
   security-scan:
     name: Security Scan (SAST & SCA)
