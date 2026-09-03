@@ -10,7 +10,7 @@ permissions:
 
 env:
   SERVICE_NAME: auth-service
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.25'
 
 jobs:
   build-test:
@@ -24,8 +24,11 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Download dependencies
-        run: go mod download
+      # Gera o go.sum a partir do go.mod (o repositório não versiona o go.sum).
+      # 'go mod tidy' resolve o grafo completo de dependências e escreve todas as
+      # entradas que o 'go build' exige, evitando o erro "missing go.sum entry".
+      - name: Sync dependencies (generate go.sum)
+        run: go mod tidy
 
       - name: Build
         run: go build ./...
@@ -44,11 +47,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # golangci-lint carrega os pacotes e também precisa do go.sum.
+      - name: Sync dependencies (generate go.sum)
+        run: go mod tidy
+
+      # v2 do golangci-lint (via action v8) é compilado com Go 1.25; a v6/v1
+      # recusa analisar um módulo que declara 'go 1.25.0'.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
-          args: --timeout=5m
+          version: v2.13.2
 
   security-scan:
     name: Security Scan (SAST & SCA)
@@ -60,6 +68,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      # gosec compila o código e o Trivy SCA escaneia o go.sum: ambos precisam dele.
+      - name: Sync dependencies (generate go.sum)
+        run: go mod tidy
 
       # SCA: scans go.sum for known-vulnerable dependency versions
       - name: SCA - Trivy filesystem scan (dependency vulnerabilities)
