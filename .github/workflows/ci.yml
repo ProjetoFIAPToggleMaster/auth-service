@@ -10,7 +10,7 @@ permissions:
 
 env:
   SERVICE_NAME: auth-service
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.25'
 
 jobs:
   build-test:
