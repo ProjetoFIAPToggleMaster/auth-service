@@ -111,31 +111,71 @@ jobs:
           exit-code: 1
           format: table
 
-      # --- AWS / ECR push disabled: no AWS account access right now (switching accounts) ---
-      # uncomment this whole block once AWS access is back to resume pushing images to ECR
-      # - name: Configure AWS credentials
-      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: ${{ secrets.AWS_REGION }}
+      # -----------------------------------------------------------------
+      # Push para o ECR privado — apenas na main, nunca em Pull Request
+      # -----------------------------------------------------------------
+      # Executar isto em PR entregaria credenciais AWS a código ainda não
+      # revisado, vindo de qualquer branch. O build e o scan acima seguem
+      # rodando em PR: só a publicação é restrita.
+      - name: Configure AWS credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Publica somente a tag imutável v1.0.0-<sha>. Não publicamos "latest"
+      # de propósito: o repositório ECR é criado com IMMUTABLE, então o
+      # segundo push de "latest" seria rejeitado pelo registry.
+      - name: Tag & push image to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: v1.0.0-${{ steps.vars.outputs.sha_short }}
+        run: |
+          docker tag "${SERVICE_NAME}:${{ steps.vars.outputs.sha_short }}" "${ECR_REGISTRY}/${SERVICE_NAME}:${IMAGE_TAG}"
+          docker push "${ECR_REGISTRY}/${SERVICE_NAME}:${IMAGE_TAG}"
+
+      # -----------------------------------------------------------------
+      # GitOps: atualiza a tag no repo raiz; o ArgoCD sincroniza sozinho
+      # -----------------------------------------------------------------
+      # O CI não fala com o cluster. Ele só edita um arquivo no Git — quem
+      # aplica no EKS é o ArgoCD, ao detectar o commit.
       #
-      # - name: Login to Amazon ECR
-      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      #   id: ecr-login
-      #   uses: aws-actions/amazon-ecr-login@v2
-      #
-      # - name: Tag & push image to ECR
-      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      #   env:
-      #     ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-      #     IMAGE_TAG: v1.0.0-${{ steps.vars.outputs.sha_short }}
-      #   run: |
-      #     docker tag ${{ env.SERVICE_NAME }}:${{ steps.vars.outputs.sha_short }} $ECR_REGISTRY/${{ env.SERVICE_NAME }}:$IMAGE_TAG
-      #     docker push $ECR_REGISTRY/${{ env.SERVICE_NAME }}:$IMAGE_TAG
-      #
-      # --- GitOps tag update disabled: depends on the ECR push above, still paused too ---
-      # once AWS access is back AND the block above is uncommented, add here a step that
-      # edits k8s/overlays/prod/patch-images.yaml in the root repo with the new IMAGE_TAG
-      # and commits+pushes it, so ArgoCD picks up the change automatically.
+      # Precisa do secret GITOPS_PAT: o GITHUB_TOKEN deste repositório só
+      # tem permissão sobre ele mesmo, não sobre o repo raiz.
+      # 'ref: master' porque o repo raiz usa master (os serviços usam main).
+      - name: Checkout GitOps repo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          repository: ProjetoFIAPToggleMaster/toggle-master-microservices
+          ref: master
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
+
+      - name: Update image tag in GitOps repo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: v1.0.0-${{ steps.vars.outputs.sha_short }}
+        run: |
+          cd gitops-repo
+          sed -i -E "s|(image: .*/${SERVICE_NAME}):.*|\1:${IMAGE_TAG}|" k8s/overlays/prod/patch-images.yaml
+
+          # Reexecutar o mesmo commit não muda nada no arquivo, e um
+          # 'git commit' sem alterações falharia — então saímos antes.
+          if git diff --quiet; then
+            echo "patch-images.yaml já aponta para ${IMAGE_TAG}; nada a fazer."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(${SERVICE_NAME}): imagem ${IMAGE_TAG}"
+          git push origin master
